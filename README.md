@@ -1,3 +1,5 @@
+Note: I didn't write any of this, it was all spewed out by claude code based on dissecting before/after usb bus traces while I painstakingly changed every goddamn setting on the camera using the old windows xp software. Nevertheless it appears to work on my camera and has not caused anything bad to happen despite heavily exercising all the functions. Its reverse engineering of the shooting data storage format also appears to correspond to reality. 
+
 # eos1v_tool
 
 Talk to a **Canon EOS-1V** over the discontinued Canon **ES-E1 / "EOS USB Cable"**
