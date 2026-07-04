@@ -102,8 +102,30 @@ def test_full_download():
     assert nframes > 0
 
 
+def test_context_manager_closes():
+    # `with EOS1V(...) as cam:` must yield the camera and always close() on exit,
+    # including when the body raises. (The CLI relies on this for cleanup.)
+    class FakeTransport:
+        def __init__(self): self.closed = False
+        def close(self): self.closed = True
+    cam = tool.EOS1V.__new__(tool.EOS1V)
+    cam.transport = FakeTransport()
+    with cam as c:
+        assert c is cam
+    assert cam.transport.closed
+    cam2 = tool.EOS1V.__new__(tool.EOS1V); cam2.transport = FakeTransport()
+    try:
+        with cam2:
+            raise ValueError("boom")
+    except ValueError:
+        pass
+    assert cam2.transport.closed, "close() must run even when the body raises"
+    print("context manager yields self and always closes: OK")
+
+
 if __name__ == '__main__':
     test_stream_parser()
     test_resend_on_not_ready()
     test_full_download()
+    test_context_manager_closes()
     print("protocol tests passed.")

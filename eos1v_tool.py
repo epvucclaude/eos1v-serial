@@ -416,9 +416,6 @@ class EOS1V:
     # running a reader thread that continuously drains EP_IN into self._rx.
     def _start_reader(self):
         import threading
-        self._rx = bytearray()
-    def _start_reader(self):
-        import threading
         self._rx = bytearray()        # raw serial bytes from the camera
         self._replies = []            # queue of complete framed replies
         self._syncs = 0               # count of 0xf4 sync bytes seen (for wake)
@@ -849,6 +846,13 @@ class EOS1V:
         try: self._reader.join(timeout=1.0)
         except Exception: pass
         self.transport.close()
+
+    # Usable as `with EOS1V(...) as cam:` -- close() always runs on exit.
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
     def _log(self, msg):
         if getattr(self, 'verbose', False):
@@ -1427,9 +1431,8 @@ def main():
         serial_port = sys.argv[i + 1]
         del sys.argv[i:i + 2]
     if len(sys.argv)>=2 and sys.argv[1]=='probe':
-        cam=EOS1V(port=serial_port)
-        try: cam.probe()
-        finally: cam.close()
+        with EOS1V(port=serial_port) as cam:
+            cam.probe()
         return
     if len(sys.argv)>=3 and sys.argv[1]=='download':
         cam=EOS1V(port=serial_port)
@@ -1468,9 +1471,8 @@ def main():
                     mask=bytes(d[9:17]); break
             print(decode_items(mask))
         else:
-            cam=EOS1V(port=serial_port)
-            try: print(decode_items(cam.read_items()))
-            finally: cam.close()
+            with EOS1V(port=serial_port) as cam:
+                print(decode_items(cam.read_items()))
     elif len(sys.argv)>=2 and sys.argv[1]=='set-clock':
         from datetime import datetime
         when = sys.argv[2] if len(sys.argv)>=3 else 'now'
@@ -1482,8 +1484,7 @@ def main():
             return
         print(f"Setting camera clock to {dt:%Y-%m-%d %H:%M:%S} "
               f"(host {'now' if when=='now' else 'value'}).")
-        cam=EOS1V(port=serial_port)
-        try:
+        with EOS1V(port=serial_port) as cam:
             old,clk,new = cam.set_clock(dt)
             def fmt(b):
                 d,t = bcd6(b) if b else (None,None)
@@ -1495,11 +1496,8 @@ def main():
                 print("  OK -- camera clock updated (seconds may differ slightly).")
             else:
                 print("  WARNING -- read-back does not match; verify on the camera.")
-        finally:
-            cam.close()
     elif len(sys.argv)>=2 and sys.argv[1]=='erase-all':
-        # Destructive 
-        cam=EOS1V(port=serial_port)
+        # Destructive
         def confirm(cnt):
             print("  *** ERASE ALL EXPOSURE DATA ON THE CAMERA ***")
             if cnt < 0:
@@ -1514,7 +1512,7 @@ def main():
             except EOFError:
                 return False
             return ans.strip() == 'YES'
-        try:
+        with EOS1V(port=serial_port) as cam:
             status, before, after = cam.erase_all(confirm)
             if status == 'aborted':
                 print("Aborted -- nothing was erased.")
@@ -1524,16 +1522,11 @@ def main():
             else:
                 print(f"Erase may have FAILED: roll count {before} -> {after}. "
                       f"Re-check on the camera before relying on this.")
-        finally:
-            cam.close()
     elif len(sys.argv)>=2 and sys.argv[1] in ('read-cfn','read-pfn'):
         kind = 'Custom' if sys.argv[1]=='read-cfn' else 'Personal'
-        cam=EOS1V(port=serial_port)
-        try:
+        with EOS1V(port=serial_port) as cam:
             regs = (cam.read_custom_functions() if kind=='Custom'
                     else cam.read_personal_functions())
-        finally:
-            cam.close()
         bad = [f"{c:02x}" for c,d,ok in regs if not ok or not d]
         print(f"{kind} Function registers (raw):")
         for c,d,ok in regs:
@@ -1617,8 +1610,7 @@ def main():
             pregs, _ = load_functions(args[2])
             out = args[3] if len(args) > 3 else None
         else:                                       # live read from the camera
-            cam = EOS1V(port=serial_port)
-            try:
+            with EOS1V(port=serial_port) as cam:
                 cfn, pfn = cam.read_all_functions()  # one session, no re-wake needed
                 cregs = {c: d for c, d, _ in cfn}
                 pregs = {c: d for c, d, _ in pfn}
@@ -1627,8 +1619,6 @@ def main():
                     print(f"WARNING: {len(bad)} register(s) did not read cleanly "
                           f"({', '.join(bad)}); their settings may show as '?(0x)'. "
                           f"Re-run dump-settings.")
-            finally:
-                cam.close()
             out = args[0] if args else None
         text = settings_dump(cregs, pregs)
         if out:
@@ -1642,13 +1632,10 @@ def main():
             cregs, _ = load_functions(args[1])
             pregs, _ = load_functions(args[2])
         else:                                           # vs live camera state
-            cam = EOS1V(port=serial_port)
-            try:
+            with EOS1V(port=serial_port) as cam:
                 cfn, pfn = cam.read_all_functions()      # one session
                 cregs = {c: d for c, d, _ in cfn}
                 pregs = {c: d for c, d, _ in pfn}
-            finally:
-                cam.close()
         print(settings_check(file_text, cregs, pregs))
     elif len(sys.argv)>=3 and sys.argv[1]=='apply':
         file_text = open(sys.argv[2]).read()
