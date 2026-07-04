@@ -1,0 +1,43 @@
+# NOTE: git does not support inline (trailing) comments in .gitignore --
+# a pattern must be alone on its line, or it is taken literally and matches nothing.
+
+# Python / editor cruft
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.tmp
+.DS_Store
+
+# Tool outputs & ad-hoc runs (curated ground truth lives in data/, ignored below)
+/out.csv
+/raw.txt
+/out*.csv
+/out*.txt
+/out*.bin
+
+# Personal film data at the repo root: ES-E1 CSV exports, roll dumps, scratch
+/[0-9]*-[0-9]*.CSV
+/roll*.csv
+/roll*.txt
+/aa.json
+
+# --- Not published in the public repo ---
+
+# Personal film-roll exposure data + ground-truth captures (tests read here)
+data/
+
+# Proprietary Canon ES-E1 binary (label-extraction reference only)
+Remote.exe
+
+# Saleae logic-analyzer capture files (working artifacts)
+*.sal
+
+# Manual page / UI screenshots (working artifacts)
+*.png
+
+# Claude Code local working dir
+.claude/
+
+# Local project notes, deliberately unpublished (use `git add -f` to include)
+CLAUDE.md
