@@ -1,0 +1,5 @@
+# Only needed for live camera operations (download/probe/set-clock/erase/read-cfn/...).
+# Offline decode and all tests run with the standard library alone.
+pyusb>=1.2
+# Optional: only for the raw serial transport (--serial /dev/...), not the Canon USB cable.
+# pyserial>=3.5
