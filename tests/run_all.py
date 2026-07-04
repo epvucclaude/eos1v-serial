@@ -8,7 +8,7 @@ import sys, pathlib, importlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'tests'))
 
-for mod in ('test_protocol', 'test_writeops', 'test_functions', 'test_decode'):
+for mod in ('test_protocol', 'test_writeops', 'test_functions', 'test_layout', 'test_decode'):
     print(f"\n===== {mod} =====")
     m = importlib.import_module(mod)
     if hasattr(m, 'main'):

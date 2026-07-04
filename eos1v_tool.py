@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#! /Users/eric/claude-code/.venv/bin/python3
 """
 eos1v_tool.py  -  Talk to a Canon EOS-1V through the Canon EOS USB Cable
                   (ES-E1 cable, USB VID:PID 04a9:3040)
@@ -724,6 +724,22 @@ class EOS1V:
         pfn = self._read_registers(PFN_READ, close=True)
         return cfn, pfn
 
+    def read_items(self):
+        """Read the 8-byte 'shooting data items to be recorded' mask (E8).
+        Same block the setup sequence already fetches; returns the 8 data bytes
+        (b'' if unreadable). Handy for confirming a config change before shooting
+        a calibration roll -- the mask is stamped into each film header (hd[9:17])
+        and drives the per-frame record layout."""
+        self._sync_open()
+        if not self._sync_wake():
+            raise RuntimeError("camera did not answer the wake -- is it on and "
+                               "in data-transfer mode?")
+        for c in (0xf6, 0xf1):
+            self._sync_cmd(c)
+        p = self.parse(self._sync_cmd(0xe8))
+        self._teardown()
+        return bytes(p[2]) if p and p[0] == 0xe8 and len(p[2]) >= 8 else b''
+
     # ES-E1's MEASURED write cadence (data/saleae-pfn25-writes.csv, two captures):
     # ~12 ms between registers, but ~75 ms after every 4th register, where the camera
     # commits the block to EEPROM and needs the time. At this pace the camera NEVER
@@ -1077,46 +1093,246 @@ def _comp(b):
 def _lab(table, b):
     return table.get(b, f"?(0x{b:02x})")
 
-def decode_frame(seq, fr, film_dx=0xf0):
-    # fr = the e4 data field: [01][81][seq][focal_hi] + 29-byte payload.
-    # Focal length is a 2-byte big-endian field fr[3:5] (high byte 0x00 for
-    # ordinary lenses, so the low byte alone looks right; 0xffff = no lens,
-    # and lenses > 255mm need the high byte). All other fields start at fr[4].
+# --- Per-frame record layout is compositional --------------------------------
+# The per-frame record is the enabled "shooting data items to be recorded"
+# concatenated in a FIXED canonical order (fields are never reordered), each a
+# fixed size, then 0xff padding. The film's 8-byte items mask (hd[9:17], same
+# format as the global E8 block) says which items are present.
+#
+# The bit<->field map below was DERIVED from the masks we hold and reproduces
+# every one of them with zero unexplained bits -- all-off (c009...: only the
+# mandatory Shooting mode + a pad byte survive), baseline, all-on, and both
+# knob variants -- AND both hardware anchors (bulb = hd[11] bits 2,3; focus =
+# hd[14] bit 3). The rule: the mask reads MSB-first within each byte, bytes
+# hd[9]..hd[16] in record order, and each field occupies exactly (its byte-size)
+# consecutive bits. So a field is present iff its bit is set, and its offset in
+# fr[] = 3 (the 01 81 seq header) + the sizes of all present fields before it.
+# The two mandatory header bits (hd[9] bits 7,6) are film-header items, not part
+# of the per-frame record. INTERNAL prefix order (which prefix field owns which
+# hd9/hd10 bit) is the record order confirmed on the baseline rolls; a mixed-item
+# roll is the one remaining ground-truth check of that ordering.
+FRAME_MASK_BASELINE = bytes.fromhex("ffff003f0008003f")
+
+# (name, size_bytes, (mask_byte_index 0=hd9.., presence_bit)), in record order.
+# mandatory=True items are always recorded (their bit is always set).
+FRAME_FIELDS = [
+    ('focal',     2, (0, 5), False),
+    ('maxap',     1, (0, 3), False),
+    ('Tv',        1, (0, 2), False),
+    ('Av',        1, (0, 1), False),
+    ('ISO',       1, (0, 0), False),
+    ('expcomp',   1, (1, 7), False),
+    ('flashcomp', 1, (1, 6), False),
+    ('flashmode', 1, (1, 5), False),
+    ('metering',  1, (1, 4), False),
+    ('mode',      1, (1, 3), True),    # mandatory: the only field an all-off roll keeps
+    ('drive',     1, (1, 2), False),
+    ('afmode',    1, (1, 1), False),
+    ('pad16',     1, (1, 0), True),    # mandatory 1-byte field, 0x00 in every capture
+    ('bulb',      2, (2, 3), False),
+    ('shotdate',  3, (3, 5), False),   # YY MM DD  -- date and time are SEPARATE
+    ('shottime',  3, (3, 2), False),   # HH MM SS     items (26-357: time on, date off)
+    ('cfn',      11, (4, 6), False),   # "Custom Function settings" (spans hd13->hd14);
+                                       #  11 raw bytes, not decoded to named C.Fn (no
+                                       #  ground truth: ES-E1's CSV omits it). 26-358.
+    ('focus',     1, (5, 3), False),   # "Focusing point achieving focus" (the 0x4a
+                                       #  byte); an AF-point code, printed raw (26-359)
+    ('selection', 7, (6, 6), False),   # "Focusing point selection" (hd15 bits 6-0, 7
+                                       #  bytes: a point bitmap); printed raw (26-360)
+    ('batdate',   3, (7, 5), False),   # "Battery-loaded date and time" is one ES-E1
+    ('battime',   3, (7, 2), False),   #  checkbox -> these two always toggle together
+]
+# Bit bookkeeping, all in the same MSB-first-within-byte, bytes-in-order traversal.
+# hd9 bits 7,6 are two mandatory HEADER items (not part of the per-frame record).
+def _field_bits(byte, bit, size):
+    """The (byte,bit) positions of a `size`-byte field, MSB-first: descend within
+    the byte, wrapping into the next byte(s) -- so a field can span mask bytes
+    (Custom Function settings runs hd13 bit6 .. hd14 bit4)."""
+    out = []
+    for _ in range(size):
+        out.append((byte, bit))
+        bit -= 1
+        if bit < 0: bit, byte = 7, byte + 1
+    return out
+
+_HEADER_BITS = {(0, 7), (0, 6)}
+_FIELD_START = {(bi, bit): name for name, _s, (bi, bit), _m in FRAME_FIELDS}
+# Every (byte,bit) a mapped field occupies. Anything set outside this ∪ header is
+# an item we haven't identified.
+_KNOWN_BITS = set(_HEADER_BITS)
+for _n, _sz, (_bi, _bit), _m in FRAME_FIELDS:
+    _KNOWN_BITS.update(_field_bits(_bi, _bit, _sz))
+
+def frame_layout(mask):
+    """items mask (hd[9:17]) -> (layout, total, unknown).
+    Every SET bit is one recorded byte (bits==bytes, an invariant confirmed on every
+    mask we hold). Walking the mask MSB-first, bytes in order, gives each field's
+    offset by COUNTING set bits before it -- so mapped fields decode correctly even
+    when unidentified items sit among them. `layout` maps present mapped field ->
+    byte offset in fr[]; `total` = 3 (01 81 seq header) + count of all recorded
+    bytes; `unknown` is True if any set bit isn't part of a mapped field."""
+    if not mask or len(mask) < 8:
+        mask = FRAME_MASK_BASELINE
+    m = bytes(mask[:8])
+    layout = {}; off = 3; unknown = False
+    for bi in range(8):
+        for bit in range(7, -1, -1):
+            if (bi, bit) in _HEADER_BITS: continue      # header item, not in fr[]
+            if not (m[bi] & (1 << bit)): continue
+            if (bi, bit) in _FIELD_START:
+                layout[_FIELD_START[(bi, bit)]] = off
+            elif (bi, bit) not in _KNOWN_BITS:
+                unknown = True                          # an item we can't identify
+            off += 1                                    # every set bit = one byte
+    return layout, off, unknown
+
+# Names as they appear in the ES-E1 "Shooting Data Items to be Recorded" dialog
+# (so read-items reads like the checkbox list). 'mode'/'pad16' aren't dialog items:
+# Shooting mode is always recorded, pad16 is a mandatory reserved byte.
+_ITEM_LABELS = {
+    'focal': 'Focal length', 'maxap': 'Maximum aperture', 'Tv': 'Shutter speed',
+    'Av': 'Aperture', 'ISO': 'Manually-set ISO film speed',
+    'expcomp': 'Exposure compensation amount',
+    'flashcomp': 'Flash exposure compensation amount', 'flashmode': 'Flash mode',
+    'metering': 'Metering mode', 'mode': 'Shooting mode (always)',
+    'drive': 'Film advance mode', 'afmode': 'AF mode', 'pad16': '(reserved)',
+    'bulb': 'Bulb exposure time', 'shotdate': 'Date', 'shottime': 'Time',
+    'cfn': 'Custom Function settings', 'focus': 'Focusing point achieving focus',
+    'selection': 'Focusing point selection',
+    'batdate': 'Battery-loaded date', 'battime': 'Battery-loaded time',
+}
+
+def decode_items(mask):
+    """Human-readable summary of an 8-byte items-to-be-recorded mask (hd[9:17] or
+    the E8 block): which recorded fields are ON/off and the resulting record
+    length, flagging any bit our layout table doesn't yet map."""
+    if not mask or len(mask) < 8:
+        return "items mask: (unreadable)"
+    m = bytes(mask[:8])
+    layout, total, uncal = frame_layout(m)
+    lines = [f"items mask: {m.hex()}    (record: {total} bytes + padding)"]
+    for name, size, (bi, bit), mand in FRAME_FIELDS:
+        on = bool(m[bi] & (1 << bit))
+        tag = 'ON ' if on else 'off'
+        note = ' [mandatory]' if mand else ''
+        lines.append(f"  {_ITEM_LABELS[name]:<20}: {tag}"
+                     f"   (hd[{9+bi}] bit {bit}, {size}B){note}")
+    if uncal:
+        where = ", ".join(f"hd[{9+b}] bit {k}"
+                          for b in range(8) for k in range(8)
+                          if (m[b] & (1 << k)) and (b, k) not in _KNOWN_BITS)
+        lines.append(f"  ** UN-MAPPED item bit(s) set: {where} -- please report;"
+                     " those fields are left blank rather than guessed **")
+    return "\n".join(lines)
+
+def _valid_bcd(b):
+    return all((x >> 4) <= 9 and (x & 0xf) <= 9 for x in b)
+
+def _bcd_date3(b):
+    """3 BCD bytes YY MM DD -> '20YY-MM-DD', or None if absent/implausible."""
+    if len(b) < 3 or all(x == 0xff for x in b) or not _valid_bcd(b[:3]): return None
+    mo, dd = int(f'{b[1]:02x}'), int(f'{b[2]:02x}')
+    if not (1 <= mo <= 12 and 1 <= dd <= 31): return None
+    return f"20{b[0]:02x}-{b[1]:02x}-{b[2]:02x}"
+
+def _bcd_time3(b):
+    """3 BCD bytes HH MM SS -> 'HH:MM:SS', or None if absent/implausible."""
+    if len(b) < 3 or all(x == 0xff for x in b) or not _valid_bcd(b[:3]): return None
+    hh, mi, ss = (int(f'{b[i]:02x}') for i in range(3))
+    if not (hh <= 23 and mi <= 59 and ss <= 59): return None
+    return f"{b[0]:02x}:{b[1]:02x}:{b[2]:02x}"
+
+FIELD_SIZE = {n: s for n, s, _b, _m in FRAME_FIELDS}
+
+def decode_frame(seq, fr, film_dx=0xf0, mask=None):
+    # fr = the e4 data field: [01][81][seq] + concatenated recorded fields + 0xff
+    # padding. Which fields are present, and thus every offset, comes from the
+    # film's items mask via frame_layout() -- there is no fixed prefix.
     p = fr[4:]
-    focal = (fr[3] << 8) | fr[4] if len(fr) > 4 else 0
-    shot_d, shot_t = bcd6(p[13:19])
-    bat_d,  bat_t  = bcd6(p[20:26])
-    # ISO: the film header records the DX-read speed (film_dx). p[4] is the
-    # actual taking speed. The camera shows a manual "(M)" value whenever the
-    # film had no DX code, OR the taking speed was overridden away from the DX
-    # code; "(DX)" always reflects the cassette's DX speed when present.
+    layout, total, unknown = frame_layout(mask)
+    # Structural integrity check that works for ANY mask, even one we've never seen:
+    # bits==bytes means the recorded content is exactly fr[0:total] and everything
+    # past it must be 0xff padding. If that holds, offsets are trustworthy even when
+    # unidentified items are present (they just occupy counted bytes we don't label);
+    # if it doesn't, we can't trust the layout -> flag, never guess (rule #1).
+    trust = (total <= len(fr)) and all(b == 0xff for b in fr[total:])
+
+    def fld(name):
+        """The raw bytes of a recorded field, or None if absent/truncated."""
+        o = layout.get(name)
+        if o is None: return None
+        b = fr[o:o + FIELD_SIZE[name]]
+        return b if len(b) == FIELD_SIZE[name] else None
+    def b1(name):
+        b = fld(name); return b[0] if b else None
+    def dt(name, conv):
+        """A 3-byte date or time field -> (string, ok). Absent -> ('', True);
+        present but not plausible BCD -> ('?(layout)', False), never silently wrong."""
+        b = fld(name)
+        if b is None: return '', True
+        s = conv(b)
+        return (s, True) if s is not None else ('?(layout)', False)
+
+    shot_d, _d1 = dt('shotdate', _bcd_date3)
+    shot_t, _d2 = dt('shottime', _bcd_time3)
+    bat_d,  _d3 = dt('batdate',  _bcd_date3)
+    bat_t,  _d4 = dt('battime',  _bcd_time3)
+    _sok = _d1 and _d2; _bok = _d3 and _d4
+    row = {'Frame': seq, 'Date': shot_d, 'Time': shot_t,
+           'Battery date': bat_d, 'Battery time': bat_t,
+           '_date_ok': _sok and _bok,
+           '_untrusted': not trust,       # layout couldn't be trusted -> flagged
+           '_unknown': unknown,           # some recorded items are unidentified
+           'raw': p.hex(' ')}
+
+    # Layout not trustworthy (record shorter than the mask needs, or non-0xff data
+    # where padding should be): don't read fields from positions that may be shifted.
+    if not trust:
+        row.update({'Date': '?(layout)', 'Time': '?(layout)',
+                    'Battery date': '?(layout)', 'Battery time': '?(layout)',
+                    '_date_ok': False})
+        return row
+
+    # ISO: the film header records the DX-read speed (film_dx). The ISO field is
+    # the actual taking speed. The camera shows a manual "(M)" value whenever the
+    # film had no DX code, OR the taking speed was overridden away from the DX code.
     has_dx     = film_dx not in (0x00, 0xf0, 0xff)
-    iso_taking = iso_from_sv(p[4])
+    iso_b      = b1('ISO')
+    iso_taking = iso_from_sv(iso_b) if iso_b is not None else ''
     iso_dx     = iso_from_sv(film_dx) if has_dx else ''
-    manual     = (not has_dx) or (p[4] != film_dx)
-    mode       = _lab(EXPOSURE, p[9] & 0xfc)
-    return {
-        'Frame': seq,
+    manual     = (not has_dx) or (iso_b is not None and iso_b != film_dx)
+    mode_b     = b1('mode')
+    mode       = _lab(EXPOSURE, mode_b & 0xfc) if mode_b is not None else ''
+    fb         = fld('focal')
+    focal      = (fb[0] << 8) | fb[1] if fb else 0
+    maxap, tv, av = b1('maxap'), b1('Tv'), b1('Av')
+    ec, fc, fmb   = b1('expcomp'), b1('flashcomp'), b1('flashmode')
+    met, dr, afb  = b1('metering'), b1('drive'), b1('afmode')
+    # Focus-point items are recorded as opaque AF-point codes ES-E1 doesn't export
+    # or interpret; we print them raw (hex) and don't guess the point mapping.
+    focus_b = fld('focus'); sel_b = fld('selection')
+    row.update({
         'Focal length': f"{focal}mm" if focal != 0 else '',
-        'Max aperture': apex_av(p[1]),
-        'Tv': '' if p[2] == 0xf0 else apex_tv(p[2]),   # 0xf0 = Bulb / no shutter
-        'Av': apex_av(p[3]),
+        'Max aperture': apex_av(maxap) if maxap is not None else '',
+        'Tv': '' if (tv is None or tv == 0xf0) else apex_tv(tv),  # 0xf0 = Bulb
+        'Av': apex_av(av) if av is not None else '',
         'ISO (DX)': iso_dx,
         'ISO (M)':  iso_taking if manual else '',
-        # Exposure comp (p[5]) and flash exposure comp (p[6]): signed, eighths of
-        # a stop (0x08=+1.0, 0xf8=-1.0, 0x05=+0.7). Windows software blanks exposure comp in
-        # Manual/Bulb. 
-        'Exposure compensation':       '' if mode in _NO_EXPCOMP else _comp(p[5]),
-        'Flash exposure compensation': _comp(p[6]),
+        # Exposure comp / flash exposure comp: signed eighths of a stop (0x08=+1.0,
+        # 0xf8=-1.0, 0x05=+0.7). ES-E1 blanks exposure comp in Manual/Bulb.
+        'Exposure compensation':       '' if (ec is None or mode in _NO_EXPCOMP) else _comp(ec),
+        'Flash exposure compensation': _comp(fc) if fc is not None else '',
         'Shooting mode': mode,
-        'Metering mode': _lab(METERING, p[8] & 0xf0),
-        'Flash mode':    _flash(p[7]),
-        'Film advance':  _lab(DRIVE,    p[10] & 0x7f),   # 0x80 = multiple-exp. continuation
-        'AF mode':       _lab(AFMODE,   p[11] & 0xbf),
-        'Date': shot_d, 'Time': shot_t,
-        'Battery date': bat_d, 'Battery time': bat_t,
-        'raw': p.hex(' '),
-    }
+        'Metering mode': _lab(METERING, met & 0xf0) if met is not None else '',
+        'Flash mode':    _flash(fmb) if fmb is not None else '',
+        'Film advance':  _lab(DRIVE, dr & 0x7f) if dr is not None else '',  # 0x80 = ME cont.
+        # AF mode enum is the low 6 bits; bits 0x40/0x80 are flags (seen 0x42, 0xc2)
+        # that ES-E1 ignores -- mask them so e.g. 0xc2 reads One-Shot, not ?(0x82).
+        'AF mode':       _lab(AFMODE, afb & 0x3f) if afb is not None else '',
+        'AF point achieving focus': f"{focus_b[0]:02x}" if focus_b else '',
+        'AF point selection':       sel_b.hex() if sel_b else '',
+    })
+    return row
 
 def split_films_from_raw(raw_blocks):
     """raw_blocks: list of (cmd, data) tuples in order -> films structure."""
@@ -1136,12 +1352,18 @@ def films_to_csv(films, path, verbose=False):
           'Max aperture','Tv','Av','ISO (DX)','ISO (M)',
           'Exposure compensation','Flash exposure compensation',
           'Shooting mode','Metering mode','Flash mode','Film advance','AF mode',
+          'AF point achieving focus','AF point selection',
           'Multiple exposure','Date','Time','Battery date','Battery time']
     if verbose: cols.append('raw')      # hex dump only when run verbose
+    flagged=[]; untrusted_films=[]; unknown_films=[]   # post-run warnings (never silent)
     with open(path,'w',newline='') as f:
         w=csv.DictWriter(f, fieldnames=cols, extrasaction='ignore'); w.writeheader()
         for fi,film in enumerate(films,1):
             hd=film['hdr']
+            # Per-film items bitmask (hd[9:17]) drives the whole record layout.
+            mask = bytes(hd[9:17]) if len(hd)>=17 else b''
+            layout, _total, _uncal = frame_layout(mask)
+            drive_off = layout.get('drive')      # for the multiple-exposure flag
             # Film ID (matches the camera's frame-imprint, e.g. "26-218"):
             #   hd[5:7] = 3-digit running film number in BCD (02 18 -> "218")
             #   hd[7]   = 2-digit prefix in BCD          (26    -> "26")
@@ -1157,12 +1379,37 @@ def films_to_csv(films, path, verbose=False):
             dup  = {s for s in seqs if seqs.count(s) > 1}
             for j,fr in enumerate(film['frames'],1):
                 frame_no = fr[2] if len(fr)>2 else j     # the camera's frame number
-                me = (frame_no in dup) or (len(fr)>14 and (fr[14] & 0x80))
+                me = (frame_no in dup) or (drive_off is not None
+                     and len(fr) > drive_off and (fr[drive_off] & 0x80))
                 row={'Film':f"{prefix}-{num}",
                      'Film loaded date':ld,'Film loaded time':lt,
                      'Multiple exposure':'ON' if me else 'OFF'}
-                row.update(decode_frame(frame_no, fr, film_dx))
+                row.update(decode_frame(frame_no, fr, film_dx, mask))
+                fid = f"{prefix}-{num}"
+                if row.pop('_untrusted', False) and fid not in [u[0] for u in untrusted_films]:
+                    untrusted_films.append((fid, mask.hex()))
+                if row.pop('_unknown', False) and fid not in [u[0] for u in unknown_films]:
+                    unknown_films.append((fid, mask.hex()))
+                if not row.pop('_date_ok', True):
+                    flagged.append(f"{fid} frame {frame_no}")
                 w.writerow(row)
+    if untrusted_films:
+        sys.stderr.write(
+            "WARNING: could not trust the record layout on: "
+            + ", ".join(f"{fid} (items={m})" for fid,m in untrusted_films)
+            + "\n  The record doesn't match the mask (bits!=bytes or truncated); "
+              "those rolls' fields are left blank/flagged rather than guessed.\n")
+    if unknown_films:
+        sys.stderr.write(
+            "NOTE: unidentified recorded item(s) on: "
+            + ", ".join(f"{fid} (items={m})" for fid,m in unknown_films)
+            + "\n  The known fields decoded correctly; some items this camera records "
+              "aren't in our table yet and are omitted (not guessed). Please report "
+              "the mask so they can be identified.\n")
+    if flagged:
+        sys.stderr.write("WARNING: implausible date bytes flagged '?(layout)' on "
+                         f"{len(flagged)} frame(s): {', '.join(flagged[:8])}"
+                         + (" ..." if len(flagged)>8 else "") + "\n")
     return path
 
 # ============================ CLI ============================
@@ -1208,6 +1455,22 @@ def main():
         films_to_csv(films, sys.argv[3], verbose=_VERBOSE)
         n=sum(len(f['frames']) for f in films)
         print(f"Decoded {len(films)} films / {n} frames -> {sys.argv[3]}")
+    elif len(sys.argv)>=2 and sys.argv[1]=='read-items':
+        # Show the 'shooting data items to be recorded' mask. With a raw-dump
+        # argument, read it offline (E8 block, or the first film's hd[9:17]);
+        # otherwise read it live from the camera. Useful to confirm a config
+        # change took before shooting a calibration roll.
+        if len(sys.argv)>=3:
+            mask=b''
+            for c,d in load_raw_blocks(sys.argv[2]):
+                if c==0xe8 and len(d)>=8: mask=bytes(d[:8]); break
+                if c==0xe3 and len(d)>=17 and not (d[0]==1 and d[1]==0):
+                    mask=bytes(d[9:17]); break
+            print(decode_items(mask))
+        else:
+            cam=EOS1V(port=serial_port)
+            try: print(decode_items(cam.read_items()))
+            finally: cam.close()
     elif len(sys.argv)>=2 and sys.argv[1]=='set-clock':
         from datetime import datetime
         when = sys.argv[2] if len(sys.argv)>=3 else 'now'

@@ -217,6 +217,11 @@ bit 3), and the all-on block has ~31 bits set for ~16 checkboxes. Per-item bit
 mapping needs single-checkbox calibration captures (same method as P.Fn). This is
 why bulb-duration was blank in earlier exports — its record item was unchecked.
 
+**This same 8-byte mask is stamped into every film's header at `hd[9:17]`,** so each
+downloaded roll carries the layout it was shot under — that is what makes the
+per-frame record layout compositional (see §5, which maps the full bit↔field
+table). Every bit this mask exposes is now accounted for at the record level.
+
 ---
 
 ## 5. Camera data — record structure & decoding
@@ -253,9 +258,75 @@ why bulb-duration was blank in earlier exports — its record item was unchecked
   `0x20` 10-s timer. Bit `0x80` flags a **multiple-exposure** continuation record.
 - `fr[15]` = AF mode (mask `0xBF`): `0x02` One-Shot, `0x04` AI Servo, `0x12` Manual
   focus. (Bit `0x40` is an unrelated flag — mask it off.)
-- `fr[17:23]` = shot date/time, **BCD**.
-- `fr[24:30]` = battery-loaded date/time, **BCD**.
-- `fr[30:33]` = `FF FF FF` (unused / remarks).
+The offsets above (`fr[3]` focal … `fr[24:30]` battery date, `fr[30:33]` padding)
+are the **baseline layout**. They are not fixed — see the compositional model
+below. `fr[23]`'s `0x4A` is the **Focusing point** record item, and the shot and
+battery dates are `fr[17:23]` / `fr[24:30]` **only** in the baseline arrangement.
+
+**The record layout is compositional.** The per-frame record is the enabled
+"shooting data items to be recorded" concatenated in a fixed canonical order
+(fields are never reordered), each a fixed size, then `0xFF` padding — there is
+**no fixed prefix**. The per-film items bitmask `hd[9:17]` (same 8-byte format as
+the global `E8` block) says which items are present. The bit↔field map was derived
+and reproduces every mask we hold with **zero unexplained bits** — all-off
+`c0 09 00 00 00 00 00 00` (only the mandatory Shooting mode + a pad byte survive;
+`26-356.CSV` byte-exact), baseline, all-on, and both knob variants — plus both
+hardware anchors. The rule:
+
+> the mask reads **MSB-first within each byte, bytes `hd[9]..hd[16]` in record
+> order**, and **each field occupies exactly (its byte-size) consecutive bits**.
+
+So a field is present iff its bit is set, and its offset in `fr[]` =
+`3 + Σ(sizes of present fields before it)`. `frame_layout(mask)` returns this;
+`FRAME_FIELDS` is the table:
+
+These are the 18 checkboxes of the ES-E1 "Shooting Data Items to be Recorded"
+dialog, plus two mandatory items (Shooting mode; a reserved `0x00` byte). ES-E1
+grays out checkboxes once a per-frame **storage budget** is spent (its "Recordable
+film rolls remaining" tracks total record size), so not every item can be enabled
+at once — there is no reachable "all items on" mask. That's fine: the decoder
+computes offsets per-mask and never needs a maximal capture.
+
+| Item (ES-E1 dialog) | Mask bit | Size | Item (ES-E1 dialog) | Mask bit | Size |
+|---|---|---|---|---|---|
+| Focal length | `hd9` b5 | 2 | Shooting mode **(mandatory)** | `hd10` b3 | 1 |
+| Maximum aperture | `hd9` b3 | 1 | Film advance mode | `hd10` b2 | 1 |
+| Shutter speed (Tv) | `hd9` b2 | 1 | AF mode | `hd10` b1 | 1 |
+| Aperture (Av) | `hd9` b1 | 1 | (reserved, `0x00`) **(mandatory)** | `hd10` b0 | 1 |
+| Manually-set ISO | `hd9` b0 | 1 | Bulb exposure time | `hd11` b3 | 2 |
+| Exposure comp | `hd10` b7 | 1 | Date `YY MM DD` | `hd12` b5 | 3 |
+| Flash exp comp | `hd10` b6 | 1 | Time `HH MM SS` | `hd12` b2 | 3 |
+| Flash mode | `hd10` b5 | 1 | **Custom Function settings** | `hd13` b6 | **11** |
+| Metering mode | `hd10` b4 | 1 | Focusing point achieving focus (`0x4A`) | `hd14` b3 | 1 |
+| | | | **Focusing point selection** | `hd15` b6 | **7** |
+| | | | Battery-loaded date | `hd16` b5 | 3 |
+| | | | Battery-loaded time | `hd16` b2 | 3 |
+
+(`hd9` bits 7,6 are two mandatory **header**-level items, not part of the frame
+record.) Notes on the non-obvious ones, all ground-truthed against the ES-E1 dialog
++ CSVs: **Date and Time are separate checkboxes** (`hd12` 5-3 / 2-0) — roll 26-357
+recorded time but not date; **Battery-loaded date and time** is a single checkbox
+(6 bytes, `hd16`). Three items are recorded but **not exported by ES-E1's CSV**, so
+we identify them and print/skip their raw bytes without interpreting (rule #1):
+**Custom Function settings** — one checkbox, **11 bytes** spanning two mask bytes
+(`hd13` b6 → `hd14` b4; constant `21 11 11 11 11 11 11 21 42 01 02` on roll 26-358),
+counted for offsets and skipped in output; **Focusing point achieving focus** — 1
+byte, an AF-point code that varies per frame (`0x4A`, `0x8A`, `0xFF`=none…), printed
+raw; **Focusing point selection** — **7 bytes** (`hd15`, a point bitmap + selected-
+point code, roll 26-360), printed raw. The two focus items are independent
+checkboxes (both on in 26-360). The AF-mode enum is the low 6 bits; bits `0x40`/
+`0x80` are flags ES-E1 ignores (so `0xC2` reads One-Shot AF, not `?(0x82)`).
+
+Because **every set bit is exactly one recorded byte**, a field's offset is just
+`3 + (count of set bits before it)`, so known fields decode correctly even when an
+item we can't name sits among them. Three guards, all tested: `_unknown` (a set bit
+not in the table → NOTE + omit, known fields still shown), `_untrusted` (record
+doesn't match the mask, i.e. `bits≠bytes` or truncated → dates `?(layout)`, warn),
+implausible-BCD date/time → `?(layout)`. Confirmed byte-exact vs ES-E1 on baseline
+(473 frames), all-off 26-356, mixed-prefix 26-357, 26-358, 26-359 (achieving focus),
+and 26-360 (both focus items) — `tests/test_layout.py`. **Every dialog checkbox is
+now identified.** `read-items` prints the whole ON/off table for any mask (live or
+from a dump).
 
 **Frame numbering & multiple exposure:** the frame number is `fr[2]`, not a running
 index. A multiple exposure is stored as several records sharing one `fr[2]` value
@@ -283,8 +354,14 @@ Across 30 ground-truth rolls the decode is now field-exact. The only remaining g
   the continuous-with-booster vs low/high-speed continuous drive variants. The
   EOS-1V's only AF modes are One-Shot, AI Servo, and Manual focus (`AFMODE`) —
   there is **no** "AI Focus AF" (a consumer-body feature); an earlier note listing
-  it was a wrong assumption and has been removed. `fr[23]` (usually `0x4A`) is also
-  still unidentified, though it has never affected any decoded field.
+  it was a wrong assumption and has been removed. *(RESOLVED: `fr[23]`/`0x4A` is
+  not mystery padding — it's the Focusing-point-selection record item gated by
+  `hd[14] & 0x08`; see the variable-layout note in §5. The other items-mask fields
+  beyond the two confirmed knobs still need calibration — one all-items download.)*
+- **Bulb exposure time — likely lead:** the 2-byte field that `hd[11] & 0x0c`
+  inserts before the shot date is almost certainly this (the baseline mask had that
+  item OFF, which is why the column was always blank). A bulb frame shot with the
+  item enabled should reveal it.
 
 Everything else — including exposure and flash compensation, all metering modes
 (incl. Center Averaging), all drive modes (incl. ultra-high-speed), Bulb/DEP/Av/Tv/

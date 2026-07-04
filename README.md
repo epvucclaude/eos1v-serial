@@ -35,6 +35,7 @@ python eos1v_tool.py write-cfn cfn-backup.txt     # restore Custom Functions fro
 python eos1v_tool.py write-pfn pfn-backup.txt     # restore Personal Functions from a backup
 python eos1v_tool.py decode-cfn cfn-backup.txt    # decode C.Fn registers -> named settings
 python eos1v_tool.py decode-pfn pfn-backup.txt    # decode P.Fn registers -> named settings
+python eos1v_tool.py read-items [raw.txt]         # show the "data items to be recorded" mask
 python eos1v_tool.py dump-fn  cfn-backup.txt      # annotated byte/nibble/bit layout (offline)
 python eos1v_tool.py diff-fn  a.txt b.txt          # diff two register backups (offline)
 ```
