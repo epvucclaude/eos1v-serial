@@ -154,6 +154,30 @@ def test_plausibility_guard():
     print("BCD date/time plausibility accepts real/blank, rejects junk & bad values: OK")
 
 
+def test_multiple_exposure_flag():
+    # ME is flagged two ways: several records sharing one frame number, OR the drive
+    # byte's 0x80 continuation bit. The drive offset is mask-derived, so exercise it.
+    hd = bytearray(25); hd[5:8] = b'\x02\x10\x26'
+    hd[9:17] = tool.FRAME_MASK_BASELINE; hd[18] = 0xf0
+    doff = tool.frame_layout(tool.FRAME_MASK_BASELINE)[0]['drive']
+    def frame(seq, drive=0x08):
+        fr = bytearray(b'\x01\x81' + bytes([seq]) + b'\x00'*27 + b'\xff\xff\xff')
+        fr[doff] = drive
+        return bytes(fr)
+    film = {'hdr': bytes(hd),
+            'frames': [frame(1), frame(5), frame(5), frame(7, 0x88)]}  # #5 shared; #7 cont-bit
+    err = io.StringIO(); old = sys.stderr; sys.stderr = err   # dates are 0x00 -> flagged; ignore
+    fd, path = tempfile.mkstemp(suffix='.csv'); os.close(fd)
+    try:
+        tool.films_to_csv([film], path)
+    finally:
+        sys.stderr = old
+    me = {r['Frame']: r['Multiple exposure'] for r in csv.DictReader(open(path))}
+    os.unlink(path)
+    assert me['1'] == 'OFF' and me['5'] == 'ON' and me['7'] == 'ON', me
+    print("multiple-exposure flag: shared frame # and drive-0x80 bit both flag ON: OK")
+
+
 def test_all_off_decodes_shooting_mode_only():
     mask = bytes.fromhex("c009000000000000")
     fr = bytes.fromhex("0181010400ffffffff")   # frame 1, mode 0x04 = Bulb
@@ -174,6 +198,7 @@ def main():
     test_afmode_high_bit_masked()
     test_untrusted_layout_is_flagged_not_guessed()
     test_plausibility_guard()
+    test_multiple_exposure_flag()
     test_all_off_decodes_shooting_mode_only()
 
 

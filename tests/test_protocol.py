@@ -102,6 +102,29 @@ def test_full_download():
     assert nframes > 0
 
 
+def test_sync_extract_reads_0xf4_by_length():
+    # The SYNCHRONOUS read path (used by set-clock/erase/register reads) mirrors the
+    # background reader's rule: a 0xF4 is a sync ONLY at a frame boundary (echo+drop);
+    # once a frame has started it is read BY LENGTH, so a 0xF4 in the data -- or as the
+    # checksum -- is kept. This is exactly the bug that once read register cd (whose
+    # checksum is 0xF4) a byte short as "(no data)". Guard it directly.
+    cam = tool.EOS1V.__new__(tool.EOS1V)
+    echoed = []
+    cam._send_serial = lambda b: echoed.append(bytes(b))
+    frame = bytes([0xcd, 0x02, SYNC, 0x00, SYNC])   # echo, len=2, data=[f4,00], cksum=f4
+    cam._sbuf = bytearray([SYNC, SYNC]) + frame       # two idle syncs, then the frame
+    got = cam._sync_extract(0xcd)
+    assert got == frame, got.hex()                    # 0xF4 in data AND checksum kept
+    assert echoed == [bytes([SYNC]), bytes([SYNC])]   # each boundary sync echoed once
+    assert cam._sbuf == b'', cam._sbuf.hex()          # frame fully consumed
+    # a lone trailing 0xF4 after a complete frame is a boundary sync -> echoed, not data
+    cam._sbuf = bytearray(frame) + bytes([SYNC]); echoed.clear()
+    assert cam._sync_extract(0xcd) == frame           # frame read; trailing sync remains
+    assert cam._sync_extract(0xcd) is None            # only the lone sync left
+    assert echoed == [bytes([SYNC])]                  # ...and it was echoed
+    print("_sync_extract: 0xF4 read by length (data/checksum), boundary syncs echoed: OK")
+
+
 def test_context_manager_closes():
     # `with EOS1V(...) as cam:` must yield the camera and always close() on exit,
     # including when the body raises. (The CLI relies on this for cleanup.)
@@ -127,5 +150,6 @@ if __name__ == '__main__':
     test_stream_parser()
     test_resend_on_not_ready()
     test_full_download()
+    test_sync_extract_reads_0xf4_by_length()
     test_context_manager_closes()
     print("protocol tests passed.")

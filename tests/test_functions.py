@@ -265,6 +265,31 @@ def test_encode_decode_identity():
     print("encode->decode reproduces every setting value (all encoders): OK")
 
 
+def test_decode_matches_known_meanings():
+    # Anchor the byte->value tables to documented ground truth. The encode<->decode
+    # round-trip only proves self-consistency; a wrong-but-consistent table edit
+    # would pass it but drift from what ES-E1 shows. This decodes a known register
+    # dump and asserts specific named settings.
+    cfn = {k: bytes.fromhex(v.replace(' ', '')) for k, v in CFN.items()}
+    pfn = {k: bytes.fromhex(v.replace(' ', '')) for k, v in PFN.items()}
+    cs = tool.current_settings(cfn, pfn)
+    # C.Fn one-hot nibble values from the active bank d1 (... 42 01 02):
+    assert cs['C.Fn-1'].startswith('0:'), cs['C.Fn-1']    # High-speed auto rewind
+    assert cs['C.Fn-16'].startswith('1:'), cs['C.Fn-16']  # Safety shift: Enabled
+    assert cs['C.Fn-17'].startswith('1:'), cs['C.Fn-17']
+    assert cs['C.Fn-18'].startswith('2:'), cs['C.Fn-18']  # Switchover w/ Assist button
+    # P.Fn value decode (documented byte->meaning) + enable bitmask d3 = 08 10 80 00:
+    pf = tool.decode_personal_functions(pfn)
+    assert 'Max 1/8000, Min 30' in pf, 'P.Fn-4 (c3=a0 10)'
+    assert 'Max f/1.0, Min f/91' in pf, 'P.Fn-5 (c4=70 08)'
+    assert 'Metering:Evaluative' in pf, 'P.Fn-25 (cd byte 0x20)'
+    for n in (16, 21, 28):                                # d3 bits set -> enabled
+        assert f'P.Fn-{n} ON' in pf, f'P.Fn-{n} should read ON'
+    for n in (25, 30):                                    # d3 bits clear -> off
+        assert f'P.Fn-{n} off' in pf, f'P.Fn-{n} should read off'
+    print("decode of a known dump matches documented C.Fn/P.Fn meanings: OK")
+
+
 def test_backup_roundtrip():
     cam = mkcam(CFN); regs = cam.read_custom_functions()
     fd, path = tempfile.mkstemp(suffix='.txt'); os.close(fd)
@@ -289,5 +314,6 @@ if __name__ == '__main__':
     test_restore_diff()
     test_settings_roundtrip()
     test_encode_decode_identity()
+    test_decode_matches_known_meanings()
     test_backup_roundtrip()
     print("function tests passed.")
