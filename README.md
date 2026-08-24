@@ -10,6 +10,9 @@ The tip end is data *out* from the camera, the middle ring is data "into" the ca
 
 The only downside to using a DIY usb-uart cable is that you should power up the USB side before connecting the cable to the camera, or else the camera sometimes sees plugging it in as a "button press" instead and fires the shutter. When powered up already this doesn't happen.  The Canon cable avoids this by having an electrically high impedance facing the camera when unpowered.  
 
+# tagging
+there's a sort of halfassed tool eos1v-tag.py included for reading the CSV this generates when downloading shooting data from the camera, and converting it into invocations of exiftool on image files that match a template, so you can apply the CSV to a folder full of files like "20260823-eos1v-canon35f1p4-delta100-d76-###.jpg" and it will write exif tags to those files with the correct data like date, time, shutter speed, aperture, focal length, ISO, flash, etc. 
+
 # eos1v_tool
 
 Talk to a **Canon EOS-1V** over the discontinued Canon **ES-E1 / "EOS USB Cable"**
