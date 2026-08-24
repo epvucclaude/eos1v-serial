@@ -28,7 +28,7 @@ eos1v_tool.py  -  Talk to a Canon EOS-1V through the Canon EOS USB Cable
   levels), add  --serial /dev/ttyUSB0  (or /dev/cu.usbserial-XXXX on macOS) to
   any live command, or set EOS1V_SERIAL.  Needs pyserial; 9600 8N1.
 """
- sys, struct, csv, time
+import sys, struct, csv, time
 
 SETUP_SEQUENCE = [0xf6, 0xf1, 0xe8, 0xfc, 0xe1]   # post-wake status/setup queries
 TEARDOWN      = [0xf2, 0xf2]                       # best-effort close
@@ -297,7 +297,7 @@ class UsbBridgeTransport:
     BM_VENDOR_OUT = 0x41          # host->device | vendor | recipient=interface
 
     def __init__(self, log=lambda m: None):
-         usb.core, usb.util
+        import usb.core, usb.util
         self._usb = usb.util
         dev = usb.core.find(idVendor=self.VID, idProduct=self.PID)
         if dev is None:
@@ -371,8 +371,8 @@ class SerialTransport:
     unconnected pins)."""
     def __init__(self, port, log=lambda m: None):
         try:
-             serial
-        except Error:
+            import serial
+        except ImportError:
             raise RuntimeError("pyserial is required for --serial "
                                "(pip install pyserial).")
         self.ser = serial.Serial(port, baudrate=9600, bytesize=8, parity='N',
@@ -399,7 +399,7 @@ class SerialTransport:
 # ===================== protocol layer (transport-agnostic) =====================
 class EOS1V:
     def __init__(self, port=None, transport=None):
-         os
+        import os
         self.verbose = os.environ.get('EOS1V_VERBOSE', '') not in ('', '0')
         if transport is not None:                       # injected (e.g. tests)
             self.transport = transport
@@ -415,7 +415,7 @@ class EOS1V:
     # and the camera's reply arrives tens of ms later. We reproduce that by
     # running a reader thread that continuously drains EP_IN into self._rx.
     def _start_reader(self):
-         threading
+        import threading
         self._rx = bytearray()        # raw serial bytes from the camera
         self._replies = []            # queue of complete framed replies
         self._syncs = 0               # count of 0xf4 sync bytes seen (for wake)
@@ -862,7 +862,7 @@ class EOS1V:
         """One-shot diagnostic: dump descriptors, test the OUT and IN paths in
         isolation, and report exactly what the hardware does.
         Run as:  python3 eos1v_tool.py probe"""
-         usb.util, usb.core, threading
+        import usb.util, usb.core, threading
         self.verbose = True
         if not isinstance(self.transport, UsbBridgeTransport):
             print("probe is a USB-bridge diagnostic; it does not apply to a raw "
