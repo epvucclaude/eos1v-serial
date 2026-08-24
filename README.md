@@ -8,6 +8,8 @@ It has a N3 to 2.5mm TRS cable, so I wired a 2.5mm socket to a USB-serial adapte
 
 The tip end is data *out* from the camera, the middle ring is data "into" the camera, and the bottom sleeve is ground.  There's no voltage or logic conversion needed, the usb-uarrt dongle is jumpered for 5v, tip to RX, ring to TX, sleeve to GND. 
 
+The only downside to using a DIY usb-uart cable is that you should power up the USB side before connecting the cable to the camera, or else the camera sometimes sees plugging it in as a "button press" instead and fires the shutter. When powered up already this doesn't happen.  The Canon cable avoids this by having an electrically high impedance facing the camera when unpowered.  
+
 # eos1v_tool
 
 Talk to a **Canon EOS-1V** over the discontinued Canon **ES-E1 / "EOS USB Cable"**
