@@ -1,4 +1,12 @@
-Note: I didn't write any of this, it was all spewed out by claude code based on dissecting before/after usb bus traces while I painstakingly changed every goddamn setting on the camera using the old windows xp software. Nevertheless it appears to work on my camera and has not caused anything bad to happen despite heavily exercising all the functions. Its reverse engineering of the shooting data storage format also appears to correspond to reality. 
+Note: I didn't write any of this, it was all spewed out by claude code based on dissecting before/after usb bus traces while I painstakingly changed every goddamn setting on the camera using the old windows xp software. Nevertheless it appears to work on my camera and has not caused anything bad to happen despite heavily exercising all the functions. Its reverse engineering of the shooting data storage format also appears to correspond to reality.  I mostly just use it to download the shooting records to a CSV for conversion into EXIF tags, but all the camera settings are also supported for reading and writing, basically you just read the current settings out into a text file, edit the file as desired, and write it back to the camera. I should turn it into a web app or something, I guess. 
+
+# wiring:
+The camera side is the "Canon N3" connector, which has 3 pins: https://martybugs.net/blog/images/n3_connector.png  Ground is still ground, "Shutter" is data *from* the camera, and "Focus" is data *to* the camera. There are no modem control or other signals. 
+
+I bought this shutter release cable on Amazon: https://www.amazon.com/dp/B071R7SC3D
+It has a N3 to 2.5mm TRS cable, so I wired a 2.5mm socket to a USB-serial adapter (https://www.amazon.com/dp/B0FGX42GYB , though anything will work, it runs at only 9600 baud) 
+
+The tip end is data *out* from the camera, the middle ring is data "into" the camera, and the bottom sleeve is ground.  There's no voltage or logic conversion needed, the usb-uarrt dongle is jumpered for 5v, tip to RX, ring to TX, sleeve to GND. 
 
 # eos1v_tool
 
